@@ -14,7 +14,6 @@ import { GameTimer } from './components/game/GameTimer';
 import { MobileMenu } from './components/layout/MobileMenu';
 
 function App() {
-  // Keep currentPlayer state here with other states
   const [currentPlayer, setCurrentPlayer] = useState<string>('');
   const [game, setGame] = useState<ChessGame | null>(null);
   const [gameState, setGameState] = useState<ChessGameState | null>(null);
@@ -23,7 +22,6 @@ function App() {
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
   const [legalMoves, setLegalMoves] = useState<string[]>([]);
 
-  // Add authentication and matchmaking states
   const [username, setUsername] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +35,6 @@ function App() {
       return;
     }
 
-    // Determine player color
     const playerColor = gameState.gameState.players.white.playerId === currentPlayer ? 'white' :
       gameState.gameState.players.black.playerId === currentPlayer ? 'black' : null;
     
@@ -48,11 +45,9 @@ function App() {
       return;
     }
 
-    // If we have a selected square, handle the move attempt
     if (selectedSquare) {
       console.log('Processing with selected piece:', { selectedSquare, targetSquare: square, currentLegalMoves: legalMoves });
-      
-      // Clicking the same square - deselect
+
       if (square === selectedSquare) {
         console.log('Deselecting current piece');
         setSelectedSquare(null);
@@ -60,7 +55,6 @@ function App() {
         return;
       }
 
-      // Check if the clicked square is a legal move using stored legalMoves
       if (legalMoves.includes(square)) {
         console.log('Making move:', { from: selectedSquare, to: square });
         try {
@@ -87,7 +81,6 @@ function App() {
         return;
       }
 
-      // If clicked square is not a legal move but has new moves, select new piece
       if (moves && moves.length > 0) {
         console.log('Selecting new piece:', { square, newMoves: moves });
         setSelectedSquare(square);
@@ -95,13 +88,11 @@ function App() {
         return;
       }
 
-      // Clear selection if clicked on invalid square
       setSelectedSquare(null);
       setLegalMoves([]);
       return;
     }
 
-    // No piece selected - handle new selection
     if (moves && moves.length > 0) {
       console.log('Initial piece selection:', { square, moves });
       setSelectedSquare(square);
@@ -109,7 +100,6 @@ function App() {
       return;
     }
 
-    // Clicked empty square with no context
     setSelectedSquare(null);
     setLegalMoves([]);
 }, [game, gameState, selectedSquare, legalMoves, currentPlayer, setError]);
@@ -121,7 +111,7 @@ function App() {
       api.setAuthToken(authData.token);
 
       const playerData = await api.getCurrentPlayer();
-      setCurrentPlayer(playerData.id); // Set the current player ID
+      setCurrentPlayer(playerData.id); 
 
       setIsAuthenticated(true);
 
@@ -132,7 +122,7 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to start game');
     }
   };
-  // Add matchmaking handler
+
   const startMatchmaking = (ticketId: string) => {
     if (game) {
       game.destroy();
@@ -180,12 +170,10 @@ function App() {
       try {
         const state = await api.getMatchState(currentMatchId);
         if (state && state.gameState.players.white.playerId && state.gameState.players.black.playerId) {
-          // Update game state and reset delay on success
           gameInstance.updateState(state, currentPlayer);
           const updatedState = gameInstance.getState();
           setGameState(updatedState);
-          delay = 500; // Reset delay on a successful update
-        } else {
+          delay = 500; 
           console.log('Waiting for player IDs to be populated:', {
             white: state?.gameState.players.white.playerId,
             black: state?.gameState.players.black.playerId
@@ -206,9 +194,6 @@ function App() {
     return () => { isCancelled = true; };
   };
   
-
-
-  // Update the game UI rendering
   const renderGameContent = () => {
     const leftSidebar = (
       <div className="space-y-4 h-full flex flex-col">
