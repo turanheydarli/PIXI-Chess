@@ -1,0 +1,519 @@
+import * as PIXI from 'pixi.js';
+import { GameState, Position, TetrisBlock } from '../types/game';
+import { submitMove } from '../services/api'
+
+const BLOCK_SIZE = 30;
+const COLORS = [
+  0xff0000, // red
+  0x00ff00, // green
+  0x0000ff, // blue
+  0xffff00, // yellow
+  0xff00ff, // magenta
+  0x00ffff, // cyan
+  0xff8800  // orange
+];
+
+// Add these constants at the top of the file
+const QUEUE_SIZE = 4;
+
+export class TetrisGame {
+  private matchId: string;
+
+  private activePieceContainer: PIXI.Container;
+  private nextPiece: number | null = null;
+  private cleanupCallbacks: (() => void)[] = [];
+
+  private app: PIXI.Application;
+  private gameContainer: PIXI.Container;
+  private blocks: PIXI.Graphics[][] = [];
+  private opponentBlocks: PIXI.Graphics[][] = [];
+  private resizeHandler: () => void;
+  private isDestroyed: boolean = false;
+  private currentBlockSize: number = 0;
+  private currentPiece: { type: number; position: { x: number; y: number }; rotation: number } | null = null;
+  private pieceQueue: number[] = [];
+
+  // Add piece definitions
+  private static PIECES = {
+    T: { type: 1, shape: [[1, 1, 1], [0, 1, 0]] },
+    I: { type: 2, shape: [[1, 1, 1, 1]] },
+    O: { type: 3, shape: [[1, 1], [1, 1]] },
+    L: { type: 4, shape: [[1, 1, 1], [1, 0, 0]] },
+    J: { type: 5, shape: [[1, 1, 1], [0, 0, 1]] },
+    S: { type: 6, shape: [[0, 1, 1], [1, 1, 0]] },
+    Z: { type: 7, shape: [[1, 1, 0], [0, 1, 1]] }
+  };
+
+
+  // private spawnPiece(pieceType: number) {
+  //   this.currentPiece = {
+  //     type: pieceType,
+  //     position: { x: 4, y: 0 }, // Start at top center
+  //     rotation: 0
+  //   };
+
+  //   this.renderActivePiece();
+  // }
+
+  private renderActivePiece() {
+    if (!this.currentPiece) return;
+
+    this.activePieceContainer.removeChildren();
+
+    const piece = Object.values(TetrisGame.PIECES).find(p => p.type === this.currentPiece!.type);
+    if (!piece) return;
+
+    const shape = this.getRotatedShape(piece.shape, this.currentPiece.rotation);
+
+    shape.forEach((row, y) => {
+      row.forEach((value, x) => {
+        if (value === 1) {
+          const block = new PIXI.Graphics();
+          block.lineStyle(1, 0x333333);
+          block.beginFill(COLORS[this.currentPiece!.type - 1]);
+          block.drawRect(0, 0, this.currentBlockSize - 1, this.currentBlockSize - 1);
+          block.endFill();
+
+          block.position.set(
+            (this.currentPiece!.position.x + x) * this.currentBlockSize,
+            (this.currentPiece!.position.y + y) * this.currentBlockSize
+          );
+
+          this.activePieceContainer.addChild(block);
+        }
+      });
+    });
+  }
+
+  private getRotatedShape(shape: number[][], rotation: number): number[][] {
+    let rotated = shape;
+    for (let i = 0; i < rotation; i++) {
+      rotated = rotated[0].map((_, index) =>
+        rotated.map(row => row[index]).reverse()
+      );
+    }
+    return rotated;
+  }
+
+  // Add movement methods
+  public moveLeft() {
+    if (!this.currentPiece) return;
+    const newPosition = {
+      x: this.currentPiece.position.x - 1,
+      y: this.currentPiece.position.y
+    };
+    if (!this.checkCollision(newPosition)) {
+      this.submitMovePos(newPosition);
+    }
+  }
+
+  public moveRight() {
+    if (!this.currentPiece) return;
+    const newPosition = {
+      x: this.currentPiece.position.x + 1,
+      y: this.currentPiece.position.y
+    };
+    if (!this.checkCollision(newPosition)) {
+      this.submitMovePos(newPosition);
+    }
+  }
+  public instantDrop() {
+    if (!this.currentPiece) return;
+
+    let newY = this.currentPiece.position.y;
+
+    // Find the lowest possible position
+    while (!this.checkCollision({ x: this.currentPiece.position.x, y: newY + 1 })) {
+      newY++;
+    }
+
+    this.submitMovePos({
+      x: this.currentPiece.position.x,
+      y: newY
+    });
+
+    this.lockPiece();
+  }
+  public moveDown() {
+    if (!this.currentPiece) return;
+
+    const newPosition = {
+      x: this.currentPiece.position.x,
+      y: this.currentPiece.position.y + 1
+    };
+
+    if (this.checkCollision(newPosition)) {
+      this.lockPiece();
+      return;
+    }
+
+    this.submitMovePos(newPosition);
+  }
+
+  private async lockPiece() {
+    if (!this.currentPiece) return;
+
+    const piece = Object.values(TetrisGame.PIECES).find(p => p.type === this.currentPiece!.type);
+    if (!piece) return;
+
+    const shape = this.getRotatedShape(piece.shape, this.currentPiece.rotation);
+
+    try {
+      // Send lock action to server with correct format
+      const action = {
+        actionType: "tetris.move",
+        actionData: {
+          actionType: "tetris.lock",
+          pieceType: this.currentPiece.type,
+          rotation: this.currentPiece.rotation,
+          position: {
+            x: this.currentPiece.position.x,
+            y: this.currentPiece.position.y
+          }
+        }
+      };
+
+      console.log('Submitting lock:', action);
+      await submitMove(this.matchId, action); // Remove matchId as it should be handled in the API service
+
+      // Keep the local state update for immediate feedback
+      const color = COLORS[this.currentPiece.type - 1];
+      shape.forEach((row, y) => {
+        row.forEach((value, x) => {
+          if (value) {
+            const boardY = this.currentPiece!.position.y + y;
+            const boardX = this.currentPiece!.position.x + x;
+            if (boardY >= 0 && boardY < 20 && boardX >= 0 && boardX < 10) {
+              const block = this.blocks[boardY][boardX] as TetrisBlock;
+              block.clear();
+              block.lineStyle(1, 0x333333);
+              block.beginFill(color);
+              block.drawRect(0, 0, this.currentBlockSize - 1, this.currentBlockSize - 1);
+              block.endFill();
+              block.fillColor = color;
+            }
+          }
+        });
+      });
+
+      this.activePieceContainer.removeChildren();
+      this.currentPiece = null;
+
+      if (this.nextPiece) {
+        this.spawnPiece(this.nextPiece);
+      }
+    } catch (err) {
+      console.error('Failed to lock piece:', err);
+    }
+  }
+
+  public rotate(direction: number = 1) {
+    if (!this.currentPiece) return;
+
+    // Calculate new rotation (0-3)
+    let newRotation = this.currentPiece.rotation + direction;
+    if (newRotation < 0) newRotation = 3;
+    if (newRotation > 3) newRotation = 0;
+
+    this.submitMovePos({
+      x: this.currentPiece.position.x,
+      y: this.currentPiece.position.y,
+      rotation: newRotation
+    });
+  }
+
+  private async submitMovePos(position: { x: number; y: number; rotation?: number }) {
+    if (!this.currentPiece) return;
+
+    try {
+      const action = {
+        actionType: "tetris.move",
+        actionData: {
+          actionType: "tetris.move",
+          pieceType: this.currentPiece.type,
+          rotation: position.rotation ?? this.currentPiece.rotation,
+          position: {
+            x: position.x,
+            y: position.y
+          }
+        }
+      };
+
+      console.log('Submitting move:', action);
+      await submitMove(this.matchId, action);
+
+      // Update local state immediately for responsiveness
+      this.currentPiece.position = position;
+      if (position.rotation !== undefined) {
+        this.currentPiece.rotation = position.rotation;
+      }
+      this.renderActivePiece();
+    } catch (err) {
+      console.error('Failed to submit move:', err);
+    }
+  }
+
+  private checkCollision(position: Position, rotation: number = this.currentPiece?.rotation || 0): boolean {
+    if (!this.currentPiece) return false;
+
+    const piece = Object.values(TetrisGame.PIECES).find(p => p.type === this.currentPiece!.type);
+    if (!piece) return false;
+
+    const shape = this.getRotatedShape(piece.shape, rotation);
+
+    for (let y = 0; y < shape.length; y++) {
+      for (let x = 0; x < shape[y].length; x++) {
+        if (shape[y][x]) {
+          const newX = position.x + x;
+          const newY = position.y + y;
+
+          // Check bounds
+          if (newX < 0 || newX >= 10 || newY >= 20) {
+            return true;
+          }
+
+          // Check collision with placed pieces
+          if (newY >= 0 && this.blocks[newY] &&
+            (this.blocks[newY][newX] as TetrisBlock).fillColor !== 0x000000) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private initializeControls() {
+    // Set up auto-drop interval
+    const dropInterval = setInterval(() => {
+      if (!this.isDestroyed && this.currentPiece) {
+        this.moveDown();
+      }
+    }, 1000); // Adjust speed as needed (1000ms = 1 second)
+
+    // Clean up interval when game is destroyed
+    this.cleanupCallbacks.push(() => clearInterval(dropInterval));
+
+    window.addEventListener('keydown', (e) => {
+      if (this.isDestroyed) return;
+
+      switch (e.key) {
+        case 'ArrowLeft':
+          this.moveLeft();
+          break;
+        case 'ArrowRight':
+          this.moveRight();
+          break;
+        case 'z':
+          this.rotate(-1); // Counter-clockwise
+          break;
+        case 'x':
+          this.rotate(1);  // Clockwise
+          break;
+        case ' ': // Space bar
+          this.instantDrop();
+          break;
+      }
+    });
+  }
+
+  constructor(parentElement: HTMLElement, matchId: string) {
+    this.app = new PIXI.Application({
+      resizeTo: parentElement,
+      backgroundColor: 0x0a0a0a,
+      resolution: window.devicePixelRatio || 1,
+      autoDensity: true,
+      antialias: true,
+    });
+
+    this.matchId = matchId;
+
+    parentElement.appendChild(this.app.view as HTMLCanvasElement);
+
+    this.gameContainer = new PIXI.Container();
+    this.app.stage.addChild(this.gameContainer);
+
+    this.resizeHandler = () => {
+      const parent = this.app.view as HTMLCanvasElement;
+      if (!parent || !parent.parentElement) return;
+
+      const padding = 32;
+      const maxHeight = parent.parentElement.clientHeight - (padding * 2);
+      const maxWidth = parent.parentElement.clientWidth - (padding * 2);
+
+      const blockSize = Math.min(
+        Math.floor(maxHeight / 20),
+        Math.floor(maxWidth / 22)
+      );
+
+      if (blockSize !== this.currentBlockSize) {
+        this.currentBlockSize = blockSize;
+        this.gameContainer.position.set(
+          (this.app.screen.width - (blockSize * 22)) / 2,
+          (this.app.screen.height - (blockSize * 20)) / 2
+        );
+        this.initializeBoard(blockSize);
+      }
+    };
+
+    this.initializeControls();
+
+    this.activePieceContainer = new PIXI.Container();
+    this.gameContainer.addChild(this.activePieceContainer);
+
+    window.addEventListener('resize', this.resizeHandler);
+    this.resizeHandler();
+  }
+
+  private initializeBoard(blockSize: number) {
+    this.gameContainer.removeChildren();
+
+    const mainBoard = new PIXI.Container();
+    this.gameContainer.addChild(mainBoard);
+
+    const opponentBoard = new PIXI.Container();
+    opponentBoard.position.x = blockSize * 12;
+    this.gameContainer.addChild(opponentBoard);
+
+    this.activePieceContainer = new PIXI.Container();
+    this.gameContainer.addChild(this.activePieceContainer);
+
+    this.initializeBlocks(mainBoard, this.blocks, blockSize);
+    this.initializeBlocks(opponentBoard, this.opponentBlocks, blockSize * 0.5);
+  }
+
+  private initializeBlocks(board: PIXI.Container, blocks: TetrisBlock[][], blockSize: number) {
+    blocks.length = 0;
+    for (let y = 0; y < 20; y++) {
+      blocks[y] = [];
+      for (let x = 0; x < 10; x++) {
+        const block = new PIXI.Graphics() as TetrisBlock;
+        block.lineStyle(1, 0x333333);
+        block.beginFill(0x000000);
+        block.drawRect(0, 0, blockSize - 1, blockSize - 1);
+        block.endFill();
+        block.position.set(x * blockSize, y * blockSize);
+        block.fillColor = 0x000000;
+        blocks[y][x] = block;
+        board.addChild(block);
+      }
+    }
+
+    const border = new PIXI.Graphics();
+    border.lineStyle(2, 0x444444);
+    border.drawRect(-2, -2, (blockSize * 10) + 4, (blockSize * 20) + 4);
+    board.addChild(border);
+  }
+
+  public updateState(state: any) {
+    if (this.isDestroyed) return;
+
+    console.log('Received state:', state);
+
+    const gameState = state.gameState || state.GameState;
+    if (!gameState?.players || gameState.players.length === 0) {
+      console.log('No valid game state or players');
+      return;
+    }
+
+    const players = gameState.players;
+    const currentPlayer = players[0];
+
+    // Handle next piece from server
+    if (currentPlayer.nextPiece && !this.currentPiece) {
+      this.spawnPiece(currentPlayer.nextPiece);
+    }
+
+    // Generate piece queue if empty
+    if (this.pieceQueue.length === 0) {
+      for (let i = 0; i < QUEUE_SIZE; i++) {
+        this.pieceQueue.push(Math.floor(Math.random() * 7) + 1);
+      }
+    }
+
+    // Update boards
+    if (currentPlayer?.field) {
+      this.updateBoard(this.blocks, currentPlayer.field, this.currentBlockSize);
+    }
+
+    if (players[1]?.field) {
+      this.updateBoard(this.opponentBlocks, players[1].field, this.currentBlockSize * 0.5);
+    }
+
+    // Re-render active piece after board update
+    if (this.currentPiece) {
+      this.renderActivePiece();
+    }
+  }
+
+  // Modify spawnPiece method
+  private spawnPiece(pieceType: number) {
+    if (this.currentPiece) {
+      this.activePieceContainer.removeChildren();
+    }
+
+    this.currentPiece = {
+      type: pieceType,
+      position: { x: 4, y: 0 },
+      rotation: 0
+    };
+
+    // Get next piece from queue
+    if (this.pieceQueue.length > 0) {
+      this.nextPiece = this.pieceQueue.shift() || null;
+      // Add new piece to maintain queue size
+      this.pieceQueue.push(Math.floor(Math.random() * 7) + 1);
+    }
+
+    console.log('Spawned piece:', this.currentPiece, 'Next piece:', this.nextPiece);
+    this.renderActivePiece();
+  }
+
+  private updateBoard(blocks: TetrisBlock[][], field: number[][], blockSize: number) {
+    for (let y = 0; y < Math.min(field.length, blocks.length); y++) {
+      for (let x = 0; x < Math.min(field[y].length, blocks[y].length); x++) {
+        const value = field[y][x];
+        const block = blocks[y][x] as TetrisBlock;
+
+        block.clear();
+        block.lineStyle(1, 0x333333);
+        block.beginFill(value > 0 ? COLORS[value - 1] : 0x000000);
+        block.drawRect(0, 0, blockSize - 1, blockSize - 1);
+        block.endFill();
+
+        // Update the fillColor property to match the visual state
+        block.fillColor = value > 0 ? COLORS[value - 1] : 0x000000;
+      }
+    }
+  }
+
+  public destroy() {
+    if (this.isDestroyed) return;
+
+    try {
+      this.cleanupCallbacks.forEach(callback => callback());
+
+      window.removeEventListener('resize', this.resizeHandler);
+
+      while (this.gameContainer.children.length > 0) {
+        const child = this.gameContainer.children[0];
+        this.gameContainer.removeChild(child);
+        if (child instanceof PIXI.Graphics) {
+          child.destroy();
+        }
+      }
+
+      this.blocks = [];
+      this.opponentBlocks = [];
+      this.gameContainer.destroy();
+
+      if (this.app) {
+        this.app.destroy(true, { children: true, texture: true, baseTexture: true });
+      }
+
+      this.isDestroyed = true;
+    } catch (err) {
+      console.error('Error during cleanup:', err);
+    }
+  }
+}

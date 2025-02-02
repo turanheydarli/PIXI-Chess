@@ -1,0 +1,111 @@
+import axios from 'axios';
+import { GameAction, MatchState } from '../types/game';
+
+const API_BASE_URL = 'https://localhost:7257/api/v1';
+const GAME_KEY = import.meta.env.VITE_GAME_KEY || '';
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'X-Game-Key': GAME_KEY,
+    'Content-Type': 'application/json',
+  },
+});
+
+export const setAuthToken = (token: string) => {
+  api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+};
+
+export const authenticate = async (username: string) => {
+  const response = await api.post('/players/authenticate', {
+    provider: 3,
+    username,
+  });
+  return response.data;
+};
+
+export const createQueue = async () => {
+  const response = await api.post('/matchmaking/queues', {
+    name: 'tetris_vs',
+    description: 'Tetris 1v1',
+    minPlayers: 2,
+    maxPlayers: 2,
+    ticketTTL: '00:02:00',
+    matchmakerFunctionName: "tetris.matchmaker",
+    rules: {
+      gameMode: 'versus',
+      startLevel: 1,
+    },
+  });
+  return response.data;
+};
+
+export const createTicket = async () => {
+  const response = await api.post('/matchmaking/tickets', {
+    queueName: 'tetris_vs',
+    properties: {
+      skill: 1500,
+      level: 25,
+      preferredColors: ['blue', 'red'],
+    },
+  });
+  return response.data;
+};
+
+export const setPresence = async (matchId: string) => {
+  const response = await api.post(`/matchmaking/matches/${matchId}/presence`, {
+    status: "connected",
+    sessionId: crypto.randomUUID(),
+    meta: {} // Empty meta, let Nakama handle the game state
+  });
+  return response.data;
+};
+
+export const markReady = async (matchId: string) => {
+  const response = await api.post(`/matchmaking/matches/${matchId}/ready`);
+  return response.data;
+};
+
+export const submitMove = async (matchId: string, action: any) => {
+  const response = await api.post(`/matchmaking/matches/${matchId}/actions`, action);
+  return response.data;
+};
+
+export const getMatchState = async (matchId: string): Promise<MatchState> => {
+  const response = await api.get(`/matchmaking/matches/${matchId}/state`);
+  return response.data;
+};
+
+interface MatchTicketResponse {
+  id: string;
+  gameId: string;
+  playerId: string;
+  queueName: string;
+  status: string;
+  properties: any;
+  createdAt: string;
+  expiresAt: string;
+  matchId: string | null;
+}
+
+// Add new method to get ticket status
+export const getTicket = async (ticketId: string): Promise<MatchTicketResponse> => {
+  const response = await api.get(`/matchmaking/tickets/${ticketId}`);
+  return response.data;
+};
+
+// Update processMatchmaking to use ticket checking
+export const processMatchmaking = async (ticketId: string) => {
+  // First process matchmaking
+  await api.post('/matchmaking/process');
+  
+  // Then check ticket status
+  const ticket = await getTicket(ticketId);
+  
+  // If matchId is present, return it
+  if (ticket.matchId) {
+    return ticket.matchId;
+  }
+  
+  return null;
+};

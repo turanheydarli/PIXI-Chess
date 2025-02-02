@@ -1,0 +1,197 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { TetrisGame } from './game/TetrisGame';
+import * as api from './services/api';
+import { Match } from './types/match';
+
+function App() {
+  const gameRef = useRef<HTMLDivElement>(null);
+  const [game, setGame] = useState<TetrisGame | null>(null);
+  const [matchId, setMatchId] = useState<string | null>(null);
+  const [username, setUsername] = useState('');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isMatchmaking, setIsMatchmaking] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated && gameRef.current && !game) {
+      const tetrisGame = new TetrisGame(gameRef.current, matchId!);
+      setGame(tetrisGame);
+      return () => tetrisGame.destroy();
+    }
+  }, [isAuthenticated, gameRef, game]);
+
+  const handleLogin = async () => {
+    try {
+      setError(null);
+      const authData = await api.authenticate(username);
+      api.setAuthToken(authData.token);
+      setIsAuthenticated(true);
+      
+      // Wait for game initialization before proceeding
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Create ticket
+      const ticket = await api.createTicket();
+      setIsMatchmaking(true);
+      startMatchmaking(ticket.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start game');
+    }
+  };
+
+  // Remove the first useEffect that creates game on authentication
+  
+  const startMatchmaking = (ticketId: string) => {
+    // Cleanup any existing game
+    if (game) {
+      game.destroy();
+      setGame(null);
+    }
+
+    const matchmakingInterval = setInterval(async () => {
+      try {
+        const matchId = await api.processMatchmaking(ticketId);
+        
+        if (matchId) {
+          clearInterval(matchmakingInterval);
+          setIsMatchmaking(false);
+          setMatchId(matchId);
+          
+          await api.setPresence(matchId);
+
+          // Initialize new game
+          if (gameRef.current) {
+            const tetrisGame = new TetrisGame(gameRef.current, matchId);
+            setGame(tetrisGame);
+            startGameLoop(matchId, tetrisGame);
+          }
+        }
+      } catch (err) {
+        clearInterval(matchmakingInterval);
+        setIsMatchmaking(false);
+        setError(err instanceof Error ? err.message : 'Failed to process matchmaking');
+      }
+    }, 2000);
+  };
+
+  // Update cleanup effect
+  useEffect(() => {
+    return () => {
+      if (game) {
+        try {
+          game.destroy();
+        } catch (err) {
+          console.error('Error cleaning up game:', err);
+        }
+      }
+    };
+  }, []);
+
+  const startGameLoop = (currentMatchId: string, gameInstance: TetrisGame) => {
+    console.log("Starting game loop for match:", currentMatchId, "Game instance:", gameInstance);
+    
+    const pollInterval = setInterval(async () => {
+      try {
+        const state = await api.getMatchState(currentMatchId);
+        console.log("Received match state:", state);
+        gameInstance.updateState(state);
+      } catch (err) {
+        console.error("Game loop error:", err);
+        clearInterval(pollInterval);
+        setError(err instanceof Error ? err.message : 'Failed to get match state');
+      }
+    }, 100);
+  
+    return () => clearInterval(pollInterval);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#1a1a1a] text-gray-200 flex flex-col">
+      {!isAuthenticated ? (
+        // Login Screen
+        <div className="flex-1 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#2a2a2a] p-8 rounded-lg shadow-2xl border border-gray-800">
+            <h1 className="text-4xl font-bold mb-8 text-center text-blue-400">TETRIS.IO</h1>
+            {error && (
+              <div className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-lg text-red-300">
+                {error}
+              </div>
+            )}
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Enter username"
+              className="w-full p-3 mb-6 bg-[#1a1a1a] border border-gray-700 rounded-lg focus:border-blue-500 focus:outline-none transition-colors"
+            />
+            <button
+              onClick={handleLogin}
+              className="w-full p-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition-colors"
+            >
+              Play Now
+            </button>
+          </div>
+        </div>
+      ) : (
+        // Game Screen
+        <div className="flex-1 flex flex-col md:flex-row gap-6 p-4 md:p-6">
+          {/* Game Area */}
+          <div className="flex-1 flex flex-col">
+            <div className="flex justify-between items-center mb-4">
+              <div className="flex items-center gap-4">
+                <h2 className="text-xl font-semibold">{username}</h2>
+                <span className="px-3 py-1 bg-blue-500/20 rounded-full text-blue-300 text-sm">
+                  Level 1
+                </span>
+              </div>
+              <div className="text-xl font-mono">Score: 0</div>
+            </div>
+            
+            {/* Game Container */}
+            <div className="relative flex-1 bg-[#0a0a0a] rounded-lg overflow-hidden">
+              {isMatchmaking && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+                  <div className="text-center">
+                    <div className="inline-block mb-4 p-4 rounded-full bg-blue-500/20">
+                      <svg className="animate-spin h-8 w-8" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
+                      </svg>
+                    </div>
+                    <div className="text-xl font-semibold text-blue-300">
+                      Looking for opponent...
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={gameRef} className="w-full h-full" />
+            </div>
+          </div>
+
+          {/* Sidebar */}
+          <div className="w-full md:w-80 bg-[#2a2a2a] p-4 rounded-lg">
+            <h3 className="text-lg font-semibold mb-4">Next Piece</h3>
+            <div className="aspect-square w-full bg-[#1a1a1a] rounded-lg mb-6"></div>
+            
+            <div className="space-y-4">
+              <div className="flex justify-between">
+                <span>Lines</span>
+                <span className="font-mono">0</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Level</span>
+                <span className="font-mono">1</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Time</span>
+                <span className="font-mono">00:00</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
